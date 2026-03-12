@@ -24,7 +24,7 @@ A simple, safe, interactive shell script to free up disk space on macOS — no a
 ### 1. Download
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/mac-cleanup.git
+git clone https://github.com/17-jd/mac-cleanup.git
 cd mac-cleanup
 chmod +x cleanup.sh
 ```
