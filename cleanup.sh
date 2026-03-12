@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  mac-cleanup — Free up disk space on macOS
-#  https://github.com/YOUR_USERNAME/mac-cleanup
+#  https://github.com/17-jd/mac-cleanup
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'
@@ -39,10 +39,10 @@ dir_size() {
 # Ask yes/no; returns 0 for yes, 1 for no
 ask() {
   local prompt="$1"
-  if [ "${AUTO_YES:-0}" = "1" ]; then return 0; fi
+  if [ "${AUTO_YES}" = "1" ]; then return 0; fi
   echo -en "  ${BOLD}$prompt [y/N]: ${RESET}"
   read -r reply
-  [[ "$reply" =~ ^[Yy]$ ]]
+  if [[ "$reply" =~ ^[Yy]$ ]]; then return 0; else return 1; fi
 }
 
 # Safe delete — skips if path doesn't exist
@@ -58,7 +58,6 @@ free_space_gb() {
   df -g / 2>/dev/null | /usr/bin/awk 'NR==2{print $4}'
 }
 
-TOTAL_FREED=0
 BEFORE_FREE=$(free_space_gb)
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
@@ -84,13 +83,17 @@ for arg in "$@"; do
   esac
 done
 
-[ "$DRY_RUN" = "1" ] && SCAN_ONLY=1
+if [ "$DRY_RUN" = "1" ]; then SCAN_ONLY=1; fi
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 print_header
 
 echo -e "  Disk: $(df -h / | /usr/bin/awk 'NR==2{print "Used "$3" / "$2"  |  Free "$4}')"
-echo -e "  Mode: $([ "$SCAN_ONLY" = "1" ] && echo "${YELLOW}Scan only (no files deleted)${RESET}" || echo "${GREEN}Interactive cleanup${RESET}")"
+if [ "$SCAN_ONLY" = "1" ]; then
+  echo -e "  Mode: ${YELLOW}Scan only (no files deleted)${RESET}"
+else
+  echo -e "  Mode: ${GREEN}Interactive cleanup${RESET}"
+fi
 separator
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,13 +102,11 @@ separator
 section "App & System Caches  ~/Library/Caches"
 
 CACHE_DIRS=(
-  # Browser
   "Google/Chrome"
   "com.google.Chrome"
   "Firefox"
   "com.apple.Safari"
   "com.brave.Browser"
-  # Dev tools
   "Yarn"
   "pip"
   "Homebrew"
@@ -113,7 +114,6 @@ CACHE_DIRS=(
   "typescript"
   "JetBrains"
   "com.apple.python"
-  # Apps
   "com.spotify.client"
   "Comet"
   "ru.keepcoder.Telegram"
@@ -125,7 +125,6 @@ CACHE_DIRS=(
 )
 
 CACHE_ROOT="$HOME/Library/Caches"
-CACHE_TOTAL=0
 FOUND_CACHES=()
 
 for dir in "${CACHE_DIRS[@]}"; do
@@ -137,18 +136,25 @@ for dir in "${CACHE_DIRS[@]}"; do
   fi
 done
 
-# Also scan for any large unknown caches (>100MB)
-while IFS= read -r entry; do
-  path=$(echo "$entry" | /usr/bin/awk '{print $2}')
+# Also scan for any large unknown caches (>100MB) not already listed
+while IFS= read -r p; do
   already=0
-  for f in "${FOUND_CACHES[@]:-}"; do [ "$f" = "$path" ] && already=1; done
-  [ "$already" = "0" ] && info "$(echo "$entry" | /usr/bin/awk '{print $1}')  (other) $(basename "$path")" && FOUND_CACHES+=("$path")
-done < <(/usr/bin/find "$CACHE_ROOT" -maxdepth 1 -mindepth 1 -size +100000k 2>/dev/null | while read -r p; do /usr/bin/du -sh "$p" 2>/dev/null; done | sort -rh | head -10)
+  for f in "${FOUND_CACHES[@]+"${FOUND_CACHES[@]}"}"; do
+    if [ "$f" = "$p" ]; then already=1; break; fi
+  done
+  if [ "$already" = "0" ]; then
+    sz=$(dir_size "$p")
+    info "$sz  (other) $(basename "$p")"
+    FOUND_CACHES+=("$p")
+  fi
+done < <(/usr/bin/find "$CACHE_ROOT" -maxdepth 1 -mindepth 1 -size +100000k 2>/dev/null)
 
 if [ ${#FOUND_CACHES[@]} -gt 0 ]; then
-  if [ "$SCAN_ONLY" = "1" ] || ask "Delete all listed caches?"; then
-    [ "$SCAN_ONLY" = "0" ] && for f in "${FOUND_CACHES[@]}"; do safe_rm "$f"; done && success "Caches cleared"
-    [ "$SCAN_ONLY" = "1" ] && info "(scan only — not deleted)"
+  if [ "$SCAN_ONLY" = "1" ]; then
+    info "(scan only — not deleted)"
+  elif ask "Delete all listed caches?"; then
+    for f in "${FOUND_CACHES[@]}"; do safe_rm "$f"; done
+    success "Caches cleared"
   else
     skipped
   fi
@@ -162,9 +168,11 @@ section "Homebrew"
 if command -v brew &>/dev/null; then
   sz=$(dir_size "$(brew --cache)")
   info "$sz  Homebrew download cache"
-  if [ "$SCAN_ONLY" = "1" ] || ask "Run 'brew cleanup --prune=all'?"; then
-    [ "$SCAN_ONLY" = "0" ] && brew cleanup --prune=all -q 2>/dev/null && success "Homebrew cleaned"
-    [ "$SCAN_ONLY" = "1" ] && info "(scan only — not deleted)"
+  if [ "$SCAN_ONLY" = "1" ]; then
+    info "(scan only — not deleted)"
+  elif ask "Run 'brew cleanup --prune=all'?"; then
+    brew cleanup --prune=all -q 2>/dev/null
+    success "Homebrew cleaned"
   else
     skipped
   fi
@@ -193,9 +201,11 @@ for p in "${XCODE_PATHS[@]}"; do
 done
 
 if [ "$xcode_found" = "1" ]; then
-  if [ "$SCAN_ONLY" = "1" ] || ask "Delete Xcode derived data, device support & sim caches?"; then
-    [ "$SCAN_ONLY" = "0" ] && for p in "${XCODE_PATHS[@]}"; do safe_rm "$p"; done && success "Xcode junk removed"
-    [ "$SCAN_ONLY" = "1" ] && info "(scan only — not deleted)"
+  if [ "$SCAN_ONLY" = "1" ]; then
+    info "(scan only — not deleted)"
+  elif ask "Delete Xcode derived data, device support & sim caches?"; then
+    for p in "${XCODE_PATHS[@]}"; do safe_rm "$p"; done
+    success "Xcode junk removed"
   else
     skipped
   fi
@@ -209,11 +219,13 @@ fi
 section "Docker"
 
 if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-  sz=$(docker system df 2>/dev/null | /usr/bin/awk '/RECLAIMABLE/{sum+=$4} END{print sum"GB"}' || echo "unknown")
-  info "~$sz reclaimable"
-  if [ "$SCAN_ONLY" = "1" ] || ask "Run 'docker system prune -f'?"; then
-    [ "$SCAN_ONLY" = "0" ] && docker system prune -f && success "Docker pruned"
-    [ "$SCAN_ONLY" = "1" ] && info "(scan only — not deleted)"
+  info "Docker is running — checking reclaimable space..."
+  if [ "$SCAN_ONLY" = "1" ]; then
+    docker system df 2>/dev/null || true
+    info "(scan only — not deleted)"
+  elif ask "Run 'docker system prune -f'?"; then
+    docker system prune -f
+    success "Docker pruned"
   else
     skipped
   fi
@@ -222,11 +234,10 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. NODE MODULES (find top-level orphaned ones)
+# 5. ORPHANED NODE_MODULES
 # ─────────────────────────────────────────────────────────────────────────────
-section "Large node_modules folders (no package.json sibling check)"
+section "Orphaned node_modules (no package.json nearby)"
 
-NODE_TOTAL=0
 NODE_PATHS=()
 
 while IFS= read -r nm; do
@@ -241,9 +252,11 @@ done < <(/usr/bin/find "$HOME" \
   -name "node_modules" -type d -prune -print 2>/dev/null | head -30)
 
 if [ ${#NODE_PATHS[@]} -gt 0 ]; then
-  if [ "$SCAN_ONLY" = "1" ] || ask "Delete orphaned node_modules?"; then
-    [ "$SCAN_ONLY" = "0" ] && for p in "${NODE_PATHS[@]}"; do safe_rm "$p"; done && success "Orphaned node_modules removed"
-    [ "$SCAN_ONLY" = "1" ] && info "(scan only — not deleted)"
+  if [ "$SCAN_ONLY" = "1" ]; then
+    info "(scan only — not deleted)"
+  elif ask "Delete orphaned node_modules?"; then
+    for p in "${NODE_PATHS[@]}"; do safe_rm "$p"; done
+    success "Orphaned node_modules removed"
   else
     skipped
   fi
@@ -259,13 +272,14 @@ section "Telegram Media Cache"
 TELEGRAM_BASE="$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
 
 if [ -d "$TELEGRAM_BASE" ]; then
-  # Find all media subdirectories inside telegram accounts
   while IFS= read -r media_dir; do
     sz=$(dir_size "$media_dir")
     info "$sz  Telegram media cache"
-    if [ "$SCAN_ONLY" = "1" ] || ask "Clear Telegram media cache? (videos/files re-download if needed)"; then
-      [ "$SCAN_ONLY" = "0" ] && /bin/rm -rf "${media_dir:?}"/* && success "Telegram media cleared"
-      [ "$SCAN_ONLY" = "1" ] && info "(scan only — not deleted)"
+    if [ "$SCAN_ONLY" = "1" ]; then
+      info "(scan only — not deleted)"
+    elif ask "Clear Telegram media cache? (re-downloads if you open them again)"; then
+      /bin/rm -rf "${media_dir:?}"/*
+      success "Telegram media cleared"
     else
       skipped
     fi
@@ -284,9 +298,11 @@ sz=$(dir_size "$TRASH")
 
 if [ "$sz" != "0B" ]; then
   info "$sz  in Trash"
-  if [ "$SCAN_ONLY" = "1" ] || ask "Empty Trash?"; then
-    [ "$SCAN_ONLY" = "0" ] && /bin/rm -rf "${TRASH:?}"/* 2>/dev/null; success "Trash emptied"
-    [ "$SCAN_ONLY" = "1" ] && info "(scan only — not deleted)"
+  if [ "$SCAN_ONLY" = "1" ]; then
+    info "(scan only — not deleted)"
+  elif ask "Empty Trash?"; then
+    /bin/rm -rf "${TRASH:?}"/* 2>/dev/null || true
+    success "Trash emptied"
   else
     skipped
   fi
@@ -295,12 +311,12 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. LARGE FILES SCAN (>500 MB)
+# 8. LARGE FILES SCAN (>500 MB) — display only, never auto-deleted
 # ─────────────────────────────────────────────────────────────────────────────
-section "Large files >500 MB (videos, ISOs, DMGs, archives)"
+section "Large files >500 MB  (videos, ISOs, DMGs, archives)"
 
 echo ""
-/usr/bin/find "$HOME" \
+LARGE_FILES=$(/usr/bin/find "$HOME" \
   -path "$HOME/Library/Group Containers/UBF8T346G9*" -prune -o \
   -path "$HOME/Library/CloudStorage" -prune -o \
   -size +500000k -type f \
@@ -308,35 +324,36 @@ echo ""
      -o -iname "*.iso" -o -iname "*.vmdk" -o -iname "*.vdi" -o -iname "*.ova" \
      -o -iname "*.dmg" -o -iname "*.pkg" -o -iname "*.zip" \
      -o -iname "*.tar.gz" -o -iname "*.tar" \) \
-  -print 2>/dev/null | while read -r f; do
+  -print 2>/dev/null)
+
+if [ -n "$LARGE_FILES" ]; then
+  echo "$LARGE_FILES" | while read -r f; do
     /usr/bin/du -sh "$f" 2>/dev/null
   done | sort -rh | head -20
-
-echo ""
-warn "Review the above manually — these are NOT auto-deleted."
-info "Delete files you no longer need from Finder or Terminal."
+  echo ""
+  warn "These are NOT auto-deleted — review and remove manually."
+else
+  info "No large files found (>500 MB)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 9. LOGS
 # ─────────────────────────────────────────────────────────────────────────────
 section "User Log Files"
 
-LOG_PATHS=(
-  "$HOME/Library/Logs"
-)
-
-for p in "${LOG_PATHS[@]}"; do
-  if [ -e "$p" ]; then
-    sz=$(dir_size "$p")
-    info "$sz  $p"
-    if [ "$SCAN_ONLY" = "1" ] || ask "Clear user logs?"; then
-      [ "$SCAN_ONLY" = "0" ] && /usr/bin/find "$p" -type f -name "*.log" -delete 2>/dev/null; success "Logs cleared"
-      [ "$SCAN_ONLY" = "1" ] && info "(scan only — not deleted)"
-    else
-      skipped
-    fi
+LOG_DIR="$HOME/Library/Logs"
+if [ -e "$LOG_DIR" ]; then
+  sz=$(dir_size "$LOG_DIR")
+  info "$sz  $LOG_DIR"
+  if [ "$SCAN_ONLY" = "1" ]; then
+    info "(scan only — not deleted)"
+  elif ask "Clear user logs?"; then
+    /usr/bin/find "$LOG_DIR" -type f -name "*.log" -delete 2>/dev/null || true
+    success "Logs cleared"
+  else
+    skipped
   fi
-done
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SUMMARY
